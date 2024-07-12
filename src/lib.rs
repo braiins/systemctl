@@ -1,7 +1,7 @@
-//! Crate to manage and monitor services through `systemctl`   
+//! Crate to manage and monitor services through `systemctl`
 //! Homepage: <https://github.com/gwbres/systemctl>
-use std::io::{Error, ErrorKind, Read};
-use std::process::{Child, ExitStatus};
+use std::io::{Error, ErrorKind};
+use std::process::{ExitStatus, Output};
 use std::str::FromStr;
 use strum_macros::EnumString;
 
@@ -11,27 +11,37 @@ use serde::{Deserialize, Serialize};
 const SYSTEMCTL_PATH: &str = "/usr/bin/systemctl";
 
 /// Invokes `systemctl $args`
-fn spawn_child(args: Vec<&str>) -> std::io::Result<Child> {
-    std::process::Command::new(std::env::var("SYSTEMCTL_PATH").unwrap_or(SYSTEMCTL_PATH.into()))
-        .args(args)
+fn run_command(args: Vec<&str>) -> std::io::Result<Output> {
+    let mut cmd = std::process::Command::new(
+        std::env::var("SYSTEMCTL_PATH").unwrap_or(SYSTEMCTL_PATH.into()),
+    );
+    cmd.args(args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .stderr(std::process::Stdio::null());
+
+    #[cfg(elevate)]
+    if !elevated_command::Command::is_elevated() {
+        let elevated_cmd = elevated_command::Command::new(cmd);
+        // TODO: handle error
+        return Ok(elevated_cmd.output().unwrap());
+    }
+
+    cmd.output()
 }
 
 /// Invokes `systemctl $args` silently
 fn systemctl(args: Vec<&str>) -> std::io::Result<ExitStatus> {
-    spawn_child(args)?.wait()
+    Ok(run_command(args)?.status)
 }
 
 /// Invokes `systemctl $args` and captures stdout stream
 fn systemctl_capture(args: Vec<&str>) -> std::io::Result<String> {
-    let mut child = spawn_child(args)?;
-    match child.wait()?.code() {
-        Some(code) if code == 0 => {}, // success
-        Some(code) if code == 1 => {}, // success -> Ok(Unit not found)
-        Some(code) if code == 3 => {}, // success -> Ok(unit is inactive and/or dead)
-        Some(code) if code == 4 => {
+    let output = run_command(args)?;
+    match output.status.code() {
+        Some(0) => {}, // success
+        Some(1) => {}, // success -> Ok(Unit not found)
+        Some(3) => {}, // success -> Ok(unit is inactive and/or dead)
+        Some(4) => {
             return Err(Error::new(
                 ErrorKind::PermissionDenied,
                 "Missing Priviledges or Unit not found",
@@ -53,8 +63,8 @@ fn systemctl_capture(args: Vec<&str>) -> std::io::Result<String> {
         },
     }
 
-    let mut stdout: Vec<u8> = Vec::new();
-    let size = child.stdout.unwrap().read_to_end(&mut stdout)?;
+    let stdout: Vec<u8> = output.stdout;
+    let size = stdout.len();
 
     if size > 0 {
         if let Ok(s) = String::from_utf8(stdout) {
@@ -151,7 +161,7 @@ pub fn exists(unit: &str) -> std::io::Result<bool> {
     Ok(!unit_list.is_empty())
 }
 
-/// Returns a `Vector` of `UnitList` structs extracted from systemctl listing.   
+/// Returns a `Vector` of `UnitList` structs extracted from systemctl listing.
 ///  + type filter: optional `--type` filter
 ///  + state filter: optional `--state` filter
 ///  + glob filter: optional unit name filter
@@ -208,7 +218,7 @@ pub struct UnitList {
     pub vendor_preset: Option<bool>,
 }
 
-/// Returns a `Vector` of unit names extracted from systemctl listing.   
+/// Returns a `Vector` of unit names extracted from systemctl listing.
 ///  + type filter: optional `--type` filter
 ///  + state filter: optional `--state` filter
 ///  + glob filter: optional unit name filter
